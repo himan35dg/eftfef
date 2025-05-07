@@ -1,0 +1,96 @@
+name: LINUX UBUNTU RDP (XFCE)
+
+on:
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # Max runtime for free tier, adjust as needed (9999 is very long)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up RDP Environment and XFCE Desktop
+        run: |
+          echo "Starting RDP and XFCE setup..."
+          sudo apt-get update
+          # Install XFCE, XRDP, and other necessary packages
+          # --no-install-recommends reduces installation size
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xrdp dbus-x11 --no-install-recommends
+          
+          # Configure XFCE as the default session for the 'runner' user
+          echo "xfce4-session" | sudo tee /home/runner/.xsession
+          sudo chown runner:runner /home/runner/.xsession
+
+          # Configure XRDP
+          # Allow any user to start an X session (needed for GitHub Actions runner)
+          sudo sed -i 's/allowed_users=console/allowed_users=anybody/' /etc/X11/Xwrapper.config || echo "Xwrapper.config not found or sed command failed, continuing..."
+
+          # Configure xrdp to use the .xsession file (which points to xfce4-session)
+          # This tells xrdp to use the system's default X session script if startwm.sh doesn't specify one
+          # Ensure startwm.sh executes .xsession if it exists or defaults to a basic Xterm
+          if [ -f /etc/xrdp/startwm.sh ]; then
+            sudo sed -i.bak '/fi/a # Start XFCE if .xsession exists\nif [ -r /home/runner/.xsession ]; then\n  . /home/runner/.xsession\n  exit 0\nfi\n' /etc/xrdp/startwm.sh
+          else
+            echo "Warning: /etc/xrdp/startwm.sh not found. XRDP might not start XFCE correctly."
+          fi
+          
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+          echo "XRDP and XFCE setup completed. XRDP should be listening on port 3389."
+
+      - name: Set Password for Runner User
+        run: |
+          RDP_PASSWORD="YourStrongPassword123!" # <<< IMPORTANT: Change this or use a secret!
+          echo "runner:$RDP_PASSWORD" | sudo chpasswd
+          echo "Password for user 'runner' has been set to: $RDP_PASSWORD"
+          echo "::set-output name=rdp_password::$RDP_PASSWORD"
+        id: user_credentials
+
+      - name: Download and Authenticate Ngrok
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }} # Make sure this secret is set in your repository
+        run: |
+          if [ -z "$NGROK_AUTH_TOKEN" ]; then
+            echo "Error: NGROK_AUTH_TOKEN secret is not set. Please add it to your GitHub repository secrets."
+            exit 1
+          fi
+          wget https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -O ngrok.tgz
+          tar -xvzf ngrok.tgz
+          chmod +x ./ngrok
+          ./ngrok authtoken $NGROK_AUTH_TOKEN
+          echo "Ngrok downloaded and authenticated."
+
+      - name: Start Ngrok Tunnel for RDP
+        run: |
+          echo "Starting Ngrok tunnel for RDP on port 3389..."
+          # Start ngrok in the background, pipe output to a log file, and use a specific region if desired
+          # Region 'ap' for Asia/Pacific. Other options: us, eu, au, sa, jp, in
+          ./ngrok tcp 3389 --region ap --log=stdout > ngrok.log &
+          sleep 15 # Give ngrok some time to connect and write to its log
+          
+          echo "Ngrok tunnel should be active."
+          echo "Check the ngrok.log file or your Ngrok Dashboard for the connection details."
+          echo "--- ngrok.log content ---"
+          cat ngrok.log
+          echo "-------------------------"
+          echo "You can find the Ngrok URL by checking the logs of this step,"
+          echo "or by going to your Ngrok dashboard: https://dashboard.ngrok.com/endpoints/status"
+
+      - name: Keep Workflow Alive and Display Info
+        run: |
+          echo "------------------------------------------------------------------------------------"
+          echo "Linux RDP Session is being prepared..."
+          echo "Connect using an RDP client (e.g., Microsoft Remote Desktop)."
+          echo ""
+          echo "You will need the Ngrok TCP address from the previous step's logs or your Ngrok Dashboard."
+          echo "Example: 0.tcp.ap.ngrok.io:XXXXX"
+          echo ""
+          echo "Username: runner"
+          echo "Password: ${{ steps.user_credentials.outputs.rdp_password }}"
+          echo ""
+          echo "This job will run for a maximum of ${{ job.timeout-minutes }} minutes or until manually cancelled."
+          echo "------------------------------------------------------------------------------------"
+          # Keep the runner alive
+          sleep infinity
